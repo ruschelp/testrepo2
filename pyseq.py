@@ -270,12 +270,12 @@ class Sequence(list):
             's': self.start(),
             'e': self.end(),
             'f': self.frames(),
-            'm': self.missing(),
+            'm': self.missing,
             'p': self._get_padding(),
             'r': self._get_framerange(missing=False),
             'R': self._get_framerange(missing=True),
-            'h': self.head(),
-            't': self.tail()
+            'h': self.head,
+            't': self.tail
         }
 
     def __str__(self):
@@ -391,20 +391,24 @@ class Sequence(list):
         except IndexError:
             return 0
 
+    @property
     def missing(self):
         """:return: List of missing files."""
         if not hasattr(self, '__missing') or not self.__missing:
             self.__missing = list(map(int, self._get_missing()))
         return self.__missing
 
+    @property
     def head(self):
         """:return: String before the sequence index number."""
         return self[0].head
 
+    @property
     def tail(self):
         """:return: String after the sequence index number."""
         return self[0].tail
 
+    @property
     def path(self):
         """:return: Absolute path to sequence."""
         _dirname = str(os.path.dirname(os.path.abspath(self[0].path)))
@@ -575,22 +579,10 @@ class Sequence(list):
     def _get_missing(self):
         """Looks for missing sequence indexes in sequence
         """
-        missing = []
-        frames = self.frames()
-        if len(frames) == 0:
-            return missing
-        prev = frames[0]
-        index = 1
-        while index < len(frames):
-            diff = frames[index] - prev
-            if diff == 1:
-                prev = frames[index]
-                index += 1
-            else:
-                prev += 1
-                missing.append(prev)
-
-        return missing
+        if len(self.frames()) == 0:
+            return []
+        total = set(range(self.start(), self.end() + 1))
+        return sorted(list(total.difference(set(self.frames()))))
 
 
 def diff(f1, f2):
