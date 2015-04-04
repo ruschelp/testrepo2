@@ -60,15 +60,20 @@ from datetime import datetime
 # default serialization format string
 global_format = '%4l %h%p%t %R'
 
-# regex for matching numerical characters
-digits_re = re.compile(r'\d+')
+# regex pattern for matching file sequences
+pattern_files = os.environ.get('PYSEQ_PATTERN_FILES', r'\d+')
+digits_re = re.compile(pattern_files)
+
+# regex pattern for matching stereo pairs
+pattern_stereo = os.environ.get('PYSEQ_PATTERN_STEREO', r'(left|right)')
+stereo_re = re.compile(pattern_stereo)
 
 # regex for matching format directives
 format_re = re.compile(r'%(?P<pad>\d+)?(?P<var>\w+)')
 
 __all__ = [
-    'SequenceError', 'Item', 'Sequence', 'diff', 'uncompress', 'getSequences',
-    'get_sequences'
+    'SequenceError', 'Item', 'Sequence', 'are_siblings', 'diff', 'uncompress',
+    'getSequences', 'get_sequences'
 ]
 
 # logging handlers
@@ -106,24 +111,23 @@ def deprecated(func):
 
 
 class Item(str):
-    """Sequence member file class
+    """Sequence member wrapper class used for matching members.
 
-    :param item: Path to file.
+    :param item: Item object.
+    :param parent: Item parent.
     """
-
-    def __init__(self, item):
+    def __init__(self, item, parent=None):
         super(Item, self).__init__()
-        log.debug('adding %s' % item)
+        log.debug('creating Item: %s' % item)
         self.item = item
+        self.parent = parent
         self.__path = getattr(item, 'path', os.path.abspath(str(item)))
         self.__dirname = os.path.dirname(self.__path)
         self.__filename = os.path.basename(str(item))
         self.__digits = digits_re.findall(self.name)
         self.__parts = digits_re.split(self.name)
-        self.__size = os.path.getsize(self.__path) if self.exists else 0
-        self.__mtime = os.path.getmtime(self.__path) if self.exists else 0
 
-        # modified by self.is_sibling()
+        # modified by are_siblings()
         self.frame = ''
         self.head = self.name
         self.tail = ''
@@ -132,10 +136,13 @@ class Item(str):
         return str(self.name)
 
     def __repr__(self):
-        return '<pyseq.Item "%s">' % self.name
+        return '<%s "%s">' % (self.item.__class__.__name__, self.name)
 
     def __getattr__(self, key):
         return getattr(self.item, key)
+
+    def __getitem__(self, index):
+        return self.item[index]
 
     @property
     def path(self):
@@ -173,23 +180,11 @@ class Item(str):
         """
         return os.path.isfile(self.__path)
 
-    @property
-    def size(self):
-        """Returns the size of the Item, reported by os.stat
-        """
-        return self.__size
-
-    @property
-    def mtime(self):
-        """Returns the modification time of the Item
-        """
-        return self.__mtime
-
     @deprecated
     def isSibling(self, item):
-        """Deprecated: use is_sibling instead
+        """Deprecated: use are_siblings instead
         """
-        return self.is_sibling(item)
+        return are_siblings(self, item)
 
     def is_sibling(self, item):
         """Determines if this and item are part of the same sequence.
@@ -198,28 +193,37 @@ class Item(str):
 
         :return: True if this and item are sequential siblings.
         """
-        if not isinstance(item, Item):
-            item = Item(item)
+        return are_siblings(self, item)
 
-        d = diff(self, item)
-        is_sibling = (len(d) == 1) and (self.parts == item.parts)
 
-        # I do not understand why we are updating information
-        # while this is a predicate method
-        if is_sibling:
-            self.frame = d[0]['frames'][0]
-            self.head = self.name[:d[0]['start']]
-            self.tail = self.name[d[0]['end']:]
-            item.frame = d[0]['frames'][1]
-            item.head = item.name[:d[0]['start']]
-            item.tail = item.name[d[0]['end']:]
+class File(str):
+    """Class for wrapping file paths.
+    """
+    def __init__(self, path):
+        super(File, self).__init__()
+        self.path = path
 
-        return is_sibling
+    @property
+    def exists(self):
+        """Returns True if this item exists on disk
+        """
+        return os.path.isfile(self.path)
+
+    @property
+    def size(self):
+        """Returns the size of the Item, reported by os.stat
+        """
+        return os.path.getsize(self.path) if self.exists else 0
+
+    @property
+    def mtime(self):
+        """Returns the modification time of the Item
+        """
+        return os.path.getmtime(self.path) if self.exists else 0
 
 
 class Sequence(list):
-    """
-    Extends list class with methods that handle item sequentialness.
+    """Extends list class with methods that handle item sequentialness.
 
     For example:
 
@@ -238,23 +242,32 @@ class Sequence(list):
         >>> print(s.format('%h%p%t %r (%R)'))
         file.%04d.jpg 1-6 (1-3 6)
     """
-
-    def __init__(self, items):
+    def __init__(self, items, pattern=pattern_files, klass=Item):
         """
         Create a new Sequence class object.
 
-        :param: items: Sequential list of items.
+        :param items: Sequential list of items.
+        :param pattern: regex pattern for matching items
 
         :return: pyseq.Sequence class instance.
         """
-        super(Sequence, self).__init__([Item(items.pop(0))])
+        self.klass = klass
+        item = items.pop(0)
+        if type(item) != Item:
+            item = self.klass(item)
+        item.parent = self
+        super(Sequence, self).__init__([item])
+        self.pattern = pattern
+        self.regex = re.compile(self.pattern)
         self.__missing = []
         self.__dirty = False
 
         while items:
-            f = Item(items.pop(0))
+            item = items.pop(0)
+            if type(item) != self.klass:
+                item = self.klass(item)
             try:
-                self.append(f)
+                self.append(item)
                 log.debug('+Item belongs to sequence.')
             except SequenceError:
                 log.debug('-Item does not belong to sequence.')
@@ -282,13 +295,16 @@ class Sequence(list):
         return self.format('%h%r%t')
 
     def __repr__(self):
-        return '<pyseq.Sequence "%s">' % str(self)
+        return '<Sequence [%s] "%s">' % (self[0].item.__class__.__name__, 
+            str(self))
 
     def __getattr__(self, key):
         return getattr(self[0], key)
 
     def __contains__(self, item):
-        super(Sequence, self).__contains__(Item(item))
+        if type(item) != self.klass:
+            item = self.klass(item)
+        super(Sequence, self).__contains__(item)
 
     def format(self, fmt=global_format):
         """Format the stdout string.
@@ -371,8 +387,7 @@ class Sequence(list):
     def frames(self):
         """:return: List of files in sequence."""
         if not hasattr(self, '__frames') or not self.__frames or self.__dirty:
-            self.__frames = list(map(int, self._get_frames()))
-            self.__frames.sort()
+            self.__frames = sorted(list(map(int, self._get_frames())))
         return self.__frames
 
     def start(self):
@@ -429,12 +444,12 @@ class Sequence(list):
             False
         """
         if len(self) > 0:
-            if not isinstance(item, Item):
-                item = Item(item)
+            if type(item) != self.klass:
+                item = self.klass(item)
             if self[-1] != item:
-                return self[-1].is_sibling(item)
+                return are_siblings(self[-1], item)
             elif self[0] != item:
-                return self[0].is_sibling(item)
+                return are_siblings(self[0], item)
             else:
                 # it should be the only item in the list
                 if self[0] == item:
@@ -443,7 +458,7 @@ class Sequence(list):
         return True
 
     def contains(self, item):
-        """Checks for sequence membership. Calls Item.is_sibling() and returns
+        """Checks for sequence membership. Calls are_siblings() and returns
         True if item is part of the sequence.
 
         For example:
@@ -461,8 +476,8 @@ class Sequence(list):
         :return: True if item is a sequence member.
         """
         if len(self) > 0:
-            if not isinstance(item, Item):
-                item = Item(item)
+            if type(item) != self.klass:
+                item = self.klass(item)
             return self.includes(item)\
                 and self.end() >= int(item.frame) >= self.start()
 
@@ -475,8 +490,10 @@ class Sequence(list):
 
         :exc:`SequenceError` raised if item is not a sequence member.
         """
-        if type(item) is not Item:
-            item = Item(item)
+        if type(item) != self.klass:
+            item = self.klass(item)
+        
+        log.debug("adding %s to %s" % (item, self))
 
         if self.includes(item):
             super(Sequence, self).append(item)
@@ -484,6 +501,8 @@ class Sequence(list):
             self.__missing = None
         else:
             raise SequenceError('Item is not a member of this sequence')
+        
+        item.parent = self
 
     def reIndex(self, offset, padding=None):
         """Renames and reindexes the items in the sequence, e.g. ::
@@ -585,7 +604,7 @@ class Sequence(list):
         return sorted(list(total.difference(set(self.frames()))))
 
 
-def diff(f1, f2):
+def diff(f1, f2, pattern=None):
     """Examines diffs between f1 and f2 and deduces numerical sequence number.
 
     For example ::
@@ -602,13 +621,21 @@ def diff(f1, f2):
     :return: Dictionary with keys: frames, start, end.
     """
     log.debug('diff: %s %s' % (f1, f2))
-    if not type(f1) == Item:
+
+    if type(f1) == str:
         f1 = Item(f1)
-    if not type(f2) == Item:
+    if type(f2) == str:
         f2 = Item(f2)
 
-    l1 = [m for m in digits_re.finditer(f1.name)]
-    l2 = [m for m in digits_re.finditer(f2.name)]
+    if pattern:
+        regex = re.compile(pattern)
+    elif type(f1) == Sequence:
+        regex = re.compile(f1.pattern)
+    else:
+        regex = digits_re
+    
+    l1 = [m for m in regex.finditer(f1.name)]
+    l2 = [m for m in regex.finditer(f2.name)]
 
     d = []
     if len(l1) == len(l2):
@@ -624,6 +651,32 @@ def diff(f1, f2):
 
     log.debug(d)
     return d
+
+
+def are_siblings(item1, item2):
+    """Determines whether item1 and item2 are part of the same sequence
+    or group.
+
+    :param item1: A :class:`.Item` or :class:`.Sequence` instance.
+    :param item2: A :class:`.Item` or :class:`.Sequence` instance.
+
+    :return: True if this and item are sequential siblings.
+    """
+    d = diff(item1, item2, 
+        pattern=item2.parent.pattern if item2.parent else None
+    )
+    is_sibling = (len(d) == 1) and (item1.parts == item2.parts)
+
+    # update some item attrs based on the results of diff
+    if is_sibling:
+        item1.frame = d[0]['frames'][0]
+        item1.head = item1.name[:d[0]['start']]
+        item1.tail = item1.name[d[0]['end']:]
+        item2.frame = d[0]['frames'][1]
+        item2.head = item2.name[:d[0]['start']]
+        item2.tail = item2.name[d[0]['end']:]
+
+    return is_sibling
 
 
 def uncompress(seq_string, fmt=global_format):
@@ -774,12 +827,12 @@ def uncompress(seq_string, fmt=global_format):
                 continue
             f = pad % i
             name = '%s%s%s' % (match.group('h'), f, match.group('t'))
-            items.append(Item(os.path.join(dirname, name)))
+            items.append(Item(File(os.path.join(dirname, name))))
     else:
         for i in frames:
             f = pad % i
             name = '%s%s%s' % (match.group('h'), f, match.group('t'))
-            items.append(Item(os.path.join(dirname, name)))
+            items.append(Item(File(os.path.join(dirname, name))))
 
     seqs = get_sequences(items)
     if seqs:
@@ -794,7 +847,7 @@ def getSequences(source):
     return get_sequences(source)
 
 
-def get_sequences(source):
+def get_sequences(source, pattern=pattern_files):
     """Returns a list of Sequence objects given a directory or list that contain
     sequential members.
 
@@ -836,6 +889,7 @@ def get_sequences(source):
         datetime.datetime(2011, 3, 21, 17, 31, 24)
 
     :param source: Can be directory path, list of strings, or sortable list of objects.
+    :param pattern: file matching pattern.
 
     :return: List of pyseq.Sequence class objects.
     """
@@ -853,11 +907,15 @@ def get_sequences(source):
             items = sorted(glob(source))
     else:
         raise TypeError('Unsupported format for source argument')
+
     log.debug('Found %s files' % len(items))
 
     # organize the items into sequences
     while items:
-        item = Item(items.pop(0))
+        item = items.pop(0)
+        if type(item) == str:
+            item = File(item)
+        item = Item(item)
         found = False
         for seq in seqs[::-1]:
             if seq.includes(item):
@@ -865,9 +923,10 @@ def get_sequences(source):
                 found = True
                 break
         if not found:
-            seq = Sequence([item])
+            seq = Sequence([item], pattern=pattern)
             seqs.append(seq)
 
     log.debug('time: %s' % (datetime.now() - start))
 
     return list(seqs)
+
