@@ -116,11 +116,14 @@ class Item(str):
     :param item: Item object.
     :param parent: Item parent.
     """
+
     def __init__(self, item, parent=None):
         super(Item, self).__init__()
         log.debug('creating Item: %s' % item)
+
         self.item = item
         self.parent = parent
+
         self.__path = getattr(item, 'path', os.path.abspath(str(item)))
         self.__dirname = os.path.dirname(self.__path)
         self.__filename = os.path.basename(str(item))
@@ -136,7 +139,7 @@ class Item(str):
         return str(self.name)
 
     def __repr__(self):
-        return '<%s "%s">' % (self.item.__class__.__name__, self.name)
+        return '<%s "%s">' % (self.__class__.__name__, self.name)
 
     def __getattr__(self, key):
         return getattr(self.item, key)
@@ -144,6 +147,10 @@ class Item(str):
     def __getitem__(self, index):
         return self.item[index]
 
+    @property
+    def __class__(self):
+        return type(self.item)
+        
     @property
     def path(self):
         """Item absolute path, if a filesystem item.
@@ -180,6 +187,10 @@ class Item(str):
         """
         return os.path.isfile(self.__path)
 
+    @property
+    def pattern(self):
+        return self.parent.pattern if self.parent else None
+
     @deprecated
     def isSibling(self, item):
         """Deprecated: use are_siblings instead
@@ -196,12 +207,11 @@ class Item(str):
         return are_siblings(self, item)
 
 
-class File(str):
+class File(Item):
     """Class for wrapping file paths.
     """
-    def __init__(self, path):
-        super(File, self).__init__()
-        self.path = path
+    def __init__(self, path, parent=None):
+        super(File, self).__init__(path, parent)
 
     @property
     def exists(self):
@@ -242,6 +252,7 @@ class Sequence(list):
         >>> print(s.format('%h%p%t %r (%R)'))
         file.%04d.jpg 1-6 (1-3 6)
     """
+    
     def __init__(self, items, pattern=pattern_files, klass=Item):
         """
         Create a new Sequence class object.
@@ -295,8 +306,7 @@ class Sequence(list):
         return self.format('%h%r%t')
 
     def __repr__(self):
-        return '<Sequence [%s] "%s">' % (self[0].item.__class__.__name__, 
-            str(self))
+        return '<%s "%s">' % (self.__class__.__name__, str(self))
 
     def __getattr__(self, key):
         return getattr(self[0], key)
@@ -387,7 +397,10 @@ class Sequence(list):
     def frames(self):
         """:return: List of files in sequence."""
         if not hasattr(self, '__frames') or not self.__frames or self.__dirty:
-            self.__frames = sorted(list(map(int, self._get_frames())))
+            try:
+                self.__frames = sorted(list(map(int, self._get_frames())))
+            except ValueError:
+                self.__frames = sorted(list(map(str, self._get_frames())))
         return self.__frames
 
     def start(self):
@@ -565,7 +578,7 @@ class Sequence(list):
         start = ''
         end = ''
 
-        if not missing:
+        if not missing or not self._get_missing():
             if self.frames():
                 return '%s-%s' % (self.start(), self.end())
             else:
@@ -600,8 +613,16 @@ class Sequence(list):
         """
         if len(self.frames()) == 0:
             return []
-        total = set(range(self.start(), self.end() + 1))
-        return sorted(list(total.difference(set(self.frames()))))
+        try:
+            total = set(range(self.start(), self.end() + 1))
+            return sorted(list(total.difference(set(self.frames()))))
+        except TypeError:
+            return []
+
+
+class Group(Sequence):
+    def __init__(self, *args, **kwargs):
+        super(Group, self).__init__(*args, **kwargs)
 
 
 def diff(f1, f2, pattern=None):
@@ -623,13 +644,13 @@ def diff(f1, f2, pattern=None):
     log.debug('diff: %s %s' % (f1, f2))
 
     if type(f1) == str:
-        f1 = Item(f1)
+        f1 = File(f1)
     if type(f2) == str:
-        f2 = Item(f2)
+        f2 = File(f2)
 
     if pattern:
         regex = re.compile(pattern)
-    elif type(f1) == Sequence:
+    elif f1.pattern:
         regex = re.compile(f1.pattern)
     else:
         regex = digits_re
@@ -662,9 +683,8 @@ def are_siblings(item1, item2):
 
     :return: True if this and item are sequential siblings.
     """
-    d = diff(item1, item2, 
-        pattern=item2.parent.pattern if item2.parent else None
-    )
+
+    d = diff(item1, item2)
     is_sibling = (len(d) == 1) and (item1.parts == item2.parts)
 
     # update some item attrs based on the results of diff
@@ -900,15 +920,17 @@ def get_sequences(source, pattern=pattern_files):
 
     if isinstance(source, list):
         items = sorted(source, key=lambda x: str(x))
+
     elif isinstance(source, str):
         if os.path.isdir(source):
             items = sorted(glob(os.path.join(source, '*')))
         else:
             items = sorted(glob(source))
+
     else:
         raise TypeError('Unsupported format for source argument')
 
-    log.debug('Found %s files' % len(items))
+    log.debug('Found %s items' % len(items))
 
     # organize the items into sequences
     while items:
@@ -923,10 +945,13 @@ def get_sequences(source, pattern=pattern_files):
                 found = True
                 break
         if not found:
-            seq = Sequence([item], pattern=pattern)
+            if type(item.item) in (Group, Sequence):
+                klass = Group
+            else:
+                klass = Sequence
+            seq = klass([item], pattern=pattern)
             seqs.append(seq)
 
     log.debug('time: %s' % (datetime.now() - start))
 
     return list(seqs)
-
