@@ -624,6 +624,11 @@ class Group(Sequence):
     def __init__(self, *args, **kwargs):
         super(Group, self).__init__(*args, **kwargs)
 
+    def _get_framerange(self, *args, **kwargs):
+        if len(self) > 1:
+            return "[" + "|".join(self.frames()) + "]"
+        return super(Group, self)._get_framerange(*args, **kwargs)
+
 
 def diff(f1, f2, pattern=None):
     """Examines diffs between f1 and f2 and deduces numerical sequence number.
