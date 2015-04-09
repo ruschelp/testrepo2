@@ -35,7 +35,7 @@ import re
 import random
 import unittest
 import subprocess
-from pyseq import Item, Sequence, diff, uncompress, get_sequences
+from pyseq import Item, Sequence, diff, uncompress, get_sequences, are_siblings
 
 
 class ItemTestCase(unittest.TestCase):
@@ -145,7 +145,7 @@ class ItemTestCase(unittest.TestCase):
         i = Item(self.test_path)
         self.assertEqual(
             i.parts,
-            ['file.', '.exr']
+            sorted(['file.', '.exr'])
         )
 
     def test_parts_attribute_is_read_only(self):
@@ -161,13 +161,18 @@ class ItemTestCase(unittest.TestCase):
         )
 
     def test_is_sibling_method_is_working_properly(self):
-        """testing if the is_sibling() is working properly
+        """testing if are_siblings is working properly
         """
         item1 = Item('/mnt/S/Some/Path/to/a/file/with/numbers/file.0010.exr')
         item2 = Item('/mnt/S/Some/Path/to/a/file/with/numbers/file.0101.exr')
 
-        self.assertTrue(item1.is_sibling(item2))
-        self.assertTrue(item2.is_sibling(item1))
+        self.assertTrue(are_siblings(item1, item2))
+        self.assertTrue(are_siblings(item2, item1))
+        self.assertFalse(are_siblings(item1, item2, pattern=r"v\d+"))
+
+        item1 = Item('/path/to/other/files.lt.001.png')
+        item2 = Item('/path/to/other/files.rt.001.png')
+        self.assertTrue(are_siblings(item1, item2, pattern=r"(lt|rt)"))
 
 
 class SequenceTestCase(unittest.TestCase):

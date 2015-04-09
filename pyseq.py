@@ -48,6 +48,7 @@ Docs and latest version available for download at
    http://github.com/rsgalloway/pyseq
 """
 
+__prog__ = "pyseq"
 __version__ = "0.4.1"
 
 import os
@@ -77,8 +78,12 @@ __all__ = [
 ]
 
 # logging handlers
-log = logging.getLogger('pyseq')
-log.addHandler(logging.StreamHandler())
+log = logging.getLogger(__prog__)
+stream_handler = logging.StreamHandler()
+debug_format = logging.Formatter(
+    "[%(asctime)s] %(filename)s:%(lineno)4s - %(funcName)15s() | %(message)s")
+stream_handler.setFormatter(debug_format)
+log.addHandler(stream_handler)
 log.setLevel(int(os.environ.get('PYSEQ_LOG_LEVEL', logging.INFO)))
 
 # Show DeprecationWarnings in 2.7+
@@ -110,6 +115,16 @@ def deprecated(func):
     return inner
 
 
+def get_parts(item, regex):
+    frames = get_frames(item, regex)
+    parts = set(regex.split(item.name)).difference(set(frames))
+    return sorted(list(parts))
+
+
+def get_frames(item, regex):
+    return regex.findall(item.name)
+
+
 class Item(str):
     """Sequence member wrapper class used for matching members.
 
@@ -119,7 +134,7 @@ class Item(str):
 
     def __init__(self, item, parent=None):
         super(Item, self).__init__()
-        log.debug('creating Item: %s' % item)
+        log.debug('Item: %s' % item)
 
         self.item = item
         self.parent = parent
@@ -127,8 +142,6 @@ class Item(str):
         self.__path = getattr(item, 'path', os.path.abspath(str(item)))
         self.__dirname = os.path.dirname(self.__path)
         self.__filename = os.path.basename(str(item))
-        self.__digits = digits_re.findall(self.name)
-        self.__parts = digits_re.split(self.name)
 
         # modified by are_siblings()
         self.frame = ''
@@ -173,13 +186,17 @@ class Item(str):
     def digits(self):
         """Numerical components of item name.
         """
-        return self.__digits
+        if self.parent and self.parent.regex:
+            return get_frames(self, self.parent.regex)
+        return get_frames(self, digits_re)
 
     @property
     def parts(self):
         """Non-numerical components of item name
         """
-        return self.__parts
+        if self.parent and self.parent.regex:
+            return get_parts(self, self.parent.regex)
+        return get_parts(self, digits_re)
 
     @property
     def exists(self):
@@ -195,7 +212,7 @@ class Item(str):
     def isSibling(self, item):
         """Deprecated: use are_siblings instead
         """
-        return are_siblings(self, item)
+        return are_siblings(self, item, self.pattern)
 
     def is_sibling(self, item):
         """Determines if this and item are part of the same sequence.
@@ -204,7 +221,7 @@ class Item(str):
 
         :return: True if this and item are sequential siblings.
         """
-        return are_siblings(self, item)
+        return are_siblings(self, item, self.pattern)
 
 
 class File(Item):
@@ -460,9 +477,9 @@ class Sequence(list):
             if type(item) != self.klass:
                 item = self.klass(item)
             if self[-1] != item:
-                return are_siblings(self[-1], item)
+                return are_siblings(self[-1], item, self.pattern)
             elif self[0] != item:
-                return are_siblings(self[0], item)
+                return are_siblings(self[0], item, self.pattern)
             else:
                 # it should be the only item in the list
                 if self[0] == item:
@@ -646,7 +663,7 @@ def diff(f1, f2, pattern=None):
 
     :return: Dictionary with keys: frames, start, end.
     """
-    log.debug('diff: %s %s' % (f1, f2))
+    log.debug("%s (pattern: %s)" % (', '.join([f1, f2]), pattern))
 
     if type(f1) == str:
         f1 = File(f1)
@@ -655,8 +672,6 @@ def diff(f1, f2, pattern=None):
 
     if pattern:
         regex = re.compile(pattern)
-    elif f1.pattern:
-        regex = re.compile(f1.pattern)
     else:
         regex = digits_re
     
@@ -675,11 +690,11 @@ def diff(f1, f2, pattern=None):
                     'frames': (m1.group(), m2.group())
                 })
 
-    log.debug(d)
+    log.debug("results: %s" % d)
     return d
 
 
-def are_siblings(item1, item2):
+def are_siblings(item1, item2, pattern=pattern_files):
     """Determines whether item1 and item2 are part of the same sequence
     or group.
 
@@ -689,8 +704,10 @@ def are_siblings(item1, item2):
     :return: True if this and item are sequential siblings.
     """
 
-    d = diff(item1, item2)
-    is_sibling = (len(d) == 1) and (item1.parts == item2.parts)
+    d = diff(item1, item2, pattern=pattern)
+    regex = re.compile(pattern)
+    is_sibling = (len(d) == 1)\
+        and (get_parts(item1, regex) == get_parts(item2, regex))
 
     # update some item attrs based on the results of diff
     if is_sibling:
@@ -958,5 +975,5 @@ def get_sequences(source, pattern=pattern_files):
             seqs.append(seq)
 
     log.debug('time: %s' % (datetime.now() - start))
-
     return list(seqs)
+
