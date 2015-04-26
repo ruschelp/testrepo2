@@ -48,15 +48,15 @@ Docs and latest version available for download at
    http://github.com/rsgalloway/pyseq
 """
 
-__prog__ = "pyseq"
-__version__ = "0.4.1"
-
 import os
 import re
 import logging
 import warnings
 from glob import glob
 from datetime import datetime
+
+__prog__ = "pyseq"
+__version__ = "0.4.2"
 
 # default serialization format string
 global_format = '%4l %h%p%t %R'
@@ -72,10 +72,13 @@ stereo_re = re.compile(pattern_stereo)
 # regex for matching format directives
 format_re = re.compile(r'%(?P<pad>\d+)?(?P<var>\w+)')
 
+# character to join explicit frame ranges on
+range_join = os.environ.get('PYSEQ_RANGE_SEP', ' ')
+
 __all__ = [
-    'SequenceError', 'Item', 'Sequence', 'are_siblings', 'diff', 'uncompress',
-    'getSequences', 'get_sequences'
-]
+    'SequenceError', 'FormatError', 'Item', 'Sequence', 'diff', 'uncompress',
+    'getSequences', 'get_sequences', 'walk'
+]    
 
 # logging handlers
 log = logging.getLogger(__prog__)
@@ -90,14 +93,22 @@ log.setLevel(int(os.environ.get('PYSEQ_LOG_LEVEL', logging.INFO)))
 warnings.simplefilter('always', DeprecationWarning)
 
 
+def _natural_key(x):
+    return [int(c) if c.isdigit() else c.lower() for c in re.split("(\d+)", x)]
+
+
+def natural_sort(items):
+    return sorted(items, key=_natural_key)
+
+
 class SequenceError(Exception):
-    """Special exception for sequence errors
+    """Special exception for Sequence errors
     """
     pass
 
 
 class FormatError(Exception):
-    """Special exception for seq format errors
+    """Special exception for Sequence format errors
     """
     pass
 
@@ -147,6 +158,24 @@ class Item(str):
         self.frame = ''
         self.head = self.name
         self.tail = ''
+
+    def __eq__(self, other):
+        return self.path == other.path
+
+    def __ne__(self, other):
+        return self.path != other.path
+
+    def __lt__(self, other):
+        return int(self.frame) < int(other.frame)
+
+    def __gt__(self, other):
+        return int(self.frame) > int(other.frame)
+
+    def __ge__(self, other):
+        return int(self.frame) >= int(other.frame)
+
+    def __le__(self, other):
+        return int(self.frame) <= int(other.frame)
 
     def __str__(self):
         return str(self.name)
@@ -202,7 +231,19 @@ class Item(str):
     def exists(self):
         """Returns True if this item exists on disk
         """
-        return os.path.isfile(self.__path)
+        return os.path.isfile(self.path)
+
+    @property
+    def size(self):
+        """Returns the size of the Item, reported by os.stat
+        """
+        return os.path.getsize(self.path) if self.exists else 0
+
+    @property
+    def mtime(self):
+        """Returns the modification time of the Item
+        """
+        return os.path.getmtime(self.path) if self.exists else 0
 
     @property
     def pattern(self):
@@ -229,24 +270,6 @@ class File(Item):
     """
     def __init__(self, path, parent=None):
         super(File, self).__init__(path, parent)
-
-    @property
-    def exists(self):
-        """Returns True if this item exists on disk
-        """
-        return os.path.isfile(self.path)
-
-    @property
-    def size(self):
-        """Returns the size of the Item, reported by os.stat
-        """
-        return os.path.getsize(self.path) if self.exists else 0
-
-    @property
-    def mtime(self):
-        """Returns the modification time of the Item
-        """
-        return os.path.getmtime(self.path) if self.exists else 0
 
 
 class Sequence(list):
@@ -312,6 +335,7 @@ class Sequence(list):
             'e': self.end(),
             'f': self.frames(),
             'm': self.missing,
+            'd': self.size,
             'p': self._get_padding(),
             'r': self._get_framerange(missing=False),
             'R': self._get_framerange(missing=True),
@@ -332,6 +356,51 @@ class Sequence(list):
         if type(item) != self.klass:
             item = self.klass(item)
         super(Sequence, self).__contains__(item)
+
+    def __setitem__(self, index, item):
+        """ Used to set a particular element in the sequence
+        """
+        if type(item) is not Item:
+            item = Item(item)
+        if self.includes(item):
+            super(Sequence, self).__setitem__(index, item)
+            self.__frames = None
+            self.__missing = None
+        else:
+            raise SequenceError("Item is not a member of sequence.")
+
+    def __setslice__(self, start, end, item):
+        if isinstance(item, basestring):
+            item = Sequence([item])
+        if isinstance(item, list) is False:
+            raise TypeError("Invalid type to add to sequence")
+        for i in item:
+            if self.includes(i) is False:
+                raise SequenceError("Item (%s) is not a member of sequence."
+                                    % i)
+        super(Sequence, self).__setslice__(start, end, item)
+        self.__frames = None
+        self.__missing = None
+
+    def __add__(self, item):
+        """ return a new sequence with the item appended.  Accepts an Item,
+            a string, or a list.
+        """
+        if isinstance(item, basestring):
+            item = Sequence([item])
+        if isinstance(item, list) is False:
+            raise TypeError("Invalid type to add to sequence")
+        ns = Sequence(self[::])
+        ns.extend(item)
+        return ns
+
+    def __iadd__(self, item):
+        if isinstance(item, basestring) or type(item) is Item:
+            item = [item]
+        if isinstance(item, list) is False:
+            raise TypeError("Invalid type to add to sequence")
+        self.extend(item)
+        return self
 
     def format(self, fmt=global_format):
         """Format the stdout string.
@@ -358,6 +427,8 @@ class Sequence(list):
         +-----------+-------------------------------------+
         | ``%R``    | explicit range, start-end [missing] |
         +-----------+-------------------------------------+
+        | ``%d``    | disk usage                          |
+        +-----------+-------------------------------------+
         | ``%h``    | string preceding sequence number    |
         +-----------+-------------------------------------+
         | ``%t``    | string after the sequence number    |
@@ -376,6 +447,7 @@ class Sequence(list):
             'p': 's',
             'r': 's',
             'R': 's',
+            'd': 's',
             'h': 's',
             't': 's'
         }
@@ -383,7 +455,10 @@ class Sequence(list):
         for m in format_re.finditer(fmt):
             var = m.group('var')
             pad = m.group('pad')
-            fmt_char = format_char_types[var]
+            try:
+                fmt_char = format_char_types[var]
+            except KeyError as err:
+                raise FormatError("Bad directive: %%%s" % var)
             _old = '%s%s' % (pad or '', var)
             _new = '(%s)%s%s' % (var, pad or '', fmt_char)
             fmt = fmt.replace(_old, _new)
@@ -534,6 +609,39 @@ class Sequence(list):
         
         item.parent = self
 
+    def insert(self, index, item):
+        """ Add another member to the sequence at the given index.
+            :param item: pyseq.Item object.
+            :exc: `SequenceError` raised if item is not a sequence member.
+        """
+        if type(item) is not Item:
+            item = Item(item)
+
+        if self.includes(item):
+            super(Sequence, self).insert(index, item)
+            self.__frames = None
+            self.__missing = None
+        else:
+            raise SequenceError("Item is not a member of this sequence.")
+
+    def extend(self, items):
+        """ Add members to the sequence.
+            :param items: list of pyseq.Item objects.
+            :exc: `SequenceError` raised if any items are not a sequence
+                  member.
+        """
+        for item in items:
+            if type(item) is not Item:
+                item = Item(item)
+
+            if self.includes(item):
+                super(Sequence, self).append(item)
+                self.__frames = None
+                self.__missing = None
+            else:
+                raise SequenceError("Item (%s) is not a member of this "
+                                    "sequence." % item)
+
     def reIndex(self, offset, padding=None):
         """Renames and reindexes the items in the sequence, e.g. ::
 
@@ -618,7 +726,7 @@ class Sequence(list):
             frange.append(str(start))
         else:
             frange.append('%s-%s' % (str(start), str(end)))
-        return ' '.join(frange)
+        return range_join.join(frange)
 
     def _get_frames(self):
         """finds the sequence indexes from item names
@@ -829,7 +937,7 @@ def uncompress(seq_string, fmt=global_format):
         log.debug("matched R")
         # 1-10 13 15-20 38
         # expand all the frames
-        number_groups = R.split(' ')
+        number_groups = R.split(range_join)
 
         for number_group in number_groups:
             if '-' in number_group:
@@ -976,4 +1084,39 @@ def get_sequences(source, pattern=pattern_files):
 
     log.debug('time: %s' % (datetime.now() - start))
     return list(seqs)
+
+
+def walk(source, level=-1, topdown=True, onerror=None, followlinks=False, hidden=False):
+    """Generator that traverses a directory structure starting at
+    source looking for sequences.
+
+    :param source: valid folder path to traverse
+    :param level: int, if < 0 traverse entire structure otherwise
+                  traverse to given depth
+    :param topdown: walk from the top down
+    :param onerror: callable to handle os.listdir errors
+    :param followlinks: whether to follow links
+    :param hidden: include hidden files and dirs
+    """
+    start = datetime.now()
+    assert isinstance(source, basestring) is True
+    assert os.path.exists(source) is True
+    source = os.path.abspath(source)
+
+    for root, dirs, files in os.walk(source, topdown, onerror, followlinks):
+
+        if not hidden:
+            files = [f for f in files if not f[0] == '.']
+            dirs[:] = [d for d in dirs if not d[0] == '.']
+
+        if topdown is True:
+            parts = root.replace(source, "").split(os.sep)
+            while "" in parts:
+                parts.remove("")
+            if len(parts) == level - 1:
+                del dirs[:]
+
+        yield root, dirs, get_sequences(files)
+
+    log.debug('time: %s' % (datetime.now() - start))
 
